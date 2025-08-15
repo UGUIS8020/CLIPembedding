@@ -19,6 +19,9 @@ load_dotenv()
 CATEGORY = "dental"
 PINECONE_INDEX ="raiden-main" 
 
+# CATEGORY = "badminton"
+# PINECONE_INDEX ="badminton" 
+
 @dataclass
 class Metadata:
     title: str = ""

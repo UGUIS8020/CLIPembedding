@@ -29,7 +29,7 @@ def get_vector_infos_with_weight(page_size=50, page_number=1):
     pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
 
     # インデックスの取得
-    index = pc.Index("raiden02")
+    index = pc.Index("raiden-main")
 
     # インデックスの統計情報を取得
     stats = index.describe_index_stats()
