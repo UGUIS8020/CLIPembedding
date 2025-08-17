@@ -1,4 +1,4 @@
-#pineconeに保存されたベクトルデータimage,figure_descriptionのweightを0.75に更新するスクリプトです。
+#pineconeに保存されたベクトルデータimage,figure_descriptionのweightを0.7に更新するスクリプトです。
 
 import os
 from dotenv import load_dotenv
@@ -6,7 +6,7 @@ from pinecone import Pinecone
 import argparse
 from math import ceil
 
-PINECONE_INDEX ="raiden" 
+PINECONE_INDEX ="raiden-main" 
 
 def display_page(vector_ids, page_size, page_number):
     total_pages = (len(vector_ids) + page_size - 1) // page_size
@@ -23,7 +23,7 @@ def display_page(vector_ids, page_size, page_number):
     print(f"\n--- ページ {page_number}/{total_pages} ---")
     return total_pages
 
-def get_vector_ids_and_update_weight(page_size=50, page_number=1):
+def get_vector_ids_and_update_weight(page_size=50, page_number=1, new_weight=0.7):
     load_dotenv()
     pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
     index = pc.Index(PINECONE_INDEX)
@@ -96,10 +96,19 @@ def get_vector_ids_and_update_weight(page_size=50, page_number=1):
                 print("無効なコマンドです。")
     
     # 更新処理スタート
-    print("\n=== type='image' または 'figure_description' のベクトルを weight=0.75 に更新します ===")
+    print(f"\n=== type='image' または 'figure_description' のベクトルを weight={new_weight} に更新します ===")
+    
+    # 更新前に確認
+    confirm = input(f"本当に weight を {new_weight} に更新しますか？ (y/N): ")
+    if confirm.lower() != 'y':
+        print("更新をキャンセルしました。")
+        return
+    
     batch_size = 100
     ids_to_update = []
+    current_metadata = {}
 
+    # 対象ベクトルの特定と現在のメタデータ保存
     for i in range(0, len(vector_ids), batch_size):
         batch_ids = vector_ids[i:i+batch_size]
         try:
@@ -109,24 +118,54 @@ def get_vector_ids_and_update_weight(page_size=50, page_number=1):
                 vec_type = metadata.get("type")
                 if vec_type in ["image", "figure_description"]:
                     ids_to_update.append(vid)
+                    current_metadata[vid] = metadata.copy()  # 既存メタデータを保存
+                    print(f"📋 {vid}: 現在のweight={metadata.get('weight', 'なし')}")
         except Exception as e:
             print(f"フェッチ失敗（{i}-{i+batch_size}）: {e}")
 
-    print(f"\n更新対象: {len(ids_to_update)} 件\n")
+    print(f"\n更新対象: {len(ids_to_update)} 件")
+    
+    if len(ids_to_update) == 0:
+        print("更新対象が見つかりませんでした。")
+        return
 
+    # バックアップ情報を表示
+    print(f"\n📋 バックアップ情報:")
+    for vid in ids_to_update[:5]:  # 最初の5件のみ表示
+        old_weight = current_metadata[vid].get('weight', 'なし')
+        print(f"  {vid}: {old_weight} → {new_weight}")
+    if len(ids_to_update) > 5:
+        print(f"  ... 他 {len(ids_to_update) - 5} 件")
+
+    # 更新実行
+    success_count = 0
+    error_count = 0
+    
     for vid in ids_to_update:
         try:
-            index.update(id=vid, set_metadata={"weight": 0.75})
-            print(f"✅ {vid}: weight → 0.75 に更新完了")
+            # 既存のメタデータを保持して重みのみ更新
+            updated_metadata = current_metadata[vid].copy()
+            updated_metadata["weight"] = new_weight
+            
+            index.update(id=vid, set_metadata=updated_metadata)
+            success_count += 1
+            print(f"✅ {vid}: weight → {new_weight} に更新完了")
         except Exception as e:
+            error_count += 1
             print(f"❌ {vid}: 更新失敗 - {e}")
 
-    print("\n✅ 全更新処理が完了しました。")
+    print(f"\n✅ 更新処理完了")
+    print(f"成功: {success_count} 件")
+    print(f"失敗: {error_count} 件")
+    
+    if error_count > 0:
+        print(f"⚠️  {error_count} 件の更新に失敗しました。ログを確認してください。")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='PineconeのベクトルIDを表示し、weight=0.75を0.7に更新します')
+    parser = argparse.ArgumentParser(description='PineconeのベクトルIDを表示し、図・画像のweightを更新します')
     parser.add_argument('--page-size', type=int, default=300, help='1ページあたりの表示件数（デフォルト: 300）')
     parser.add_argument('--page', type=int, default=1, help='表示を開始するページ番号（デフォルト: 1）')
+    parser.add_argument('--weight', type=float, default=0.7, help='新しいweight値（デフォルト: 0.7）')
     args = parser.parse_args()
     
-    get_vector_ids_and_update_weight(args.page_size, args.page)
+    get_vector_ids_and_update_weight(args.page_size, args.page, args.weight)
