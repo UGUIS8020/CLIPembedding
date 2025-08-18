@@ -291,9 +291,9 @@ def create_vectors(data: Entry, related_ids: Dict[str, List[str]] = None) -> Lis
     # タイプごとの重み設定
     type_weights = {
         "content": 1.0,      # メインテキスト（本文）は最大の重み
-        "figure_description": 0.75,  # 画像説明は中程度の重み
-        "case_description": 0.75,   # ケース説明も中程度の重み
-        "image": 0.75         # 画像も中程度の重み
+        "figure_description": 0.7,  # 画像説明は中程度の重み
+        "case_description": 0.7,   # ケース説明も中程度の重み
+        "image": 0.7         # 画像も中程度の重み
     }
     
     if data.type == "content":
