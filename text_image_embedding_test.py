@@ -7,23 +7,28 @@ import torch
 import open_clip
 from PIL import Image
 from dotenv import load_dotenv
-from pinecone import Pinecone
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
+import uuid
 
 # 環境変数をロード
 load_dotenv()
 
 # ファイルの先頭付近に定数を定義
-CATEGORY = "dental"
-PINECONE_INDEX ="raiden02" 
+# CATEGORY = "dental"
+# QDRANT_COLLECTION = "raiden-main"
+
+CATEGORY = "badminton"
+QDRANT_COLLECTION = "badminton"
 
 @dataclass
 class Metadata:
     title: str = ""
     topic: str = ""
-    item:str = "" 
+    items: List[str] = field(default_factory=list) 
     content: str = ""
     figure_descriptions: Dict[str, str] = field(default_factory=dict)
     case_descriptions: Dict[str, str] = field(default_factory=dict) 
@@ -41,10 +46,10 @@ class Entry:
 
 class TextProcessor:
     def __init__(self):
-        # 正規表現をより柔軟に修正
-        self.figure_pattern = re.compile(r'\[(Fig[\dA-Za-z]*)\]')
-        self.case_pattern = re.compile(r'\[(case[\dA-Za-z]*)\]')
-        self.any_pattern = re.compile(r'\[((Fig|case)[\dA-Za-z]*)\]')
+        # 正規表現パターンを修正してFigとcaseの両方に対応
+        self.figure_pattern = re.compile(r'\[(Fig\d+[a-zA-Z0-9]*)(?:\]|$)')
+        self.case_pattern = re.compile(r'\[(case\d+[a-zA-Z0-9]*)(?:\]|$)')
+        self.any_pattern = re.compile(r'\[((Fig|case)\d+[a-zA-Z0-9]*)(?:\]|$)')
 
     def process_file(self, file_path: str) -> List[Entry]:
         """テキストファイルを処理し、メタデータと図・ケースの説明を抽出"""
@@ -78,14 +83,14 @@ class TextProcessor:
                 
                 elif line.startswith('item[') and line.endswith(']'):
                     content = line[5:-1]  # 'item[' と ']' を除去
-                    metadata.item = content.strip()
-                    print(f"アイテム抽出（行単位）: {metadata.item}")
+                    metadata.items.append(content.strip())  # ← 上書きではなくリストに追加
+                    print(f"アイテム抽出（行単位）: {content.strip()}")
             
             # 確認のためにメタデータを表示
             print(f"\nメタデータ抽出結果:")
             print(f"タイトル: {metadata.title}")
             print(f"トピック: {metadata.topic}")
-            print(f"アイテム: {metadata.item}")
+            print(f"アイテム: {metadata.items}")
             
             # 本文と図・ケースの説明を分離
             main_content, illustration_content = self._split_content_and_illustrations(text)
@@ -261,7 +266,8 @@ def validate_environment():
     """環境変数の検証"""
     required_vars = {
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
-        "PINECONE_API_KEY": os.getenv("PINECONE_API_KEY")
+        "QDRANT_URL": os.getenv("QDRANT_URL"),
+        "QDRANT_API_KEY": os.getenv("QDRANT_API_KEY")
     }
     missing_vars = [var for var, value in required_vars.items() if not value]
     if missing_vars:
@@ -271,26 +277,55 @@ def validate_environment():
 def initialize_services():
     """サービスの初期化"""
     env_vars = validate_environment()
-    client = openai.OpenAI(api_key=env_vars["OPENAI_API_KEY"])
-    pc = Pinecone(api_key=env_vars["PINECONE_API_KEY"])
-    index = pc.Index(PINECONE_INDEX)
+    
+    # OpenAI クライアント
+    openai_client = openai.OpenAI(api_key=env_vars["OPENAI_API_KEY"])
+    
+    # Qdrant クライアント
+    qdrant_client = QdrantClient(
+        url=env_vars["QDRANT_URL"],
+        api_key=env_vars["QDRANT_API_KEY"]
+    )
+    
+    # コレクションの存在確認と作成
+    try:
+        collections = qdrant_client.get_collections()
+        collection_names = [c.name for c in collections.collections]
+        
+        if QDRANT_COLLECTION not in collection_names:
+            print(f"\nコレクション '{QDRANT_COLLECTION}' を作成します...")
+            qdrant_client.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                vectors_config=VectorParams(
+                    size=1536,
+                    distance=Distance.COSINE
+                )
+            )
+            print(f"コレクション '{QDRANT_COLLECTION}' を作成しました")
+        else:
+            print(f"\nコレクション '{QDRANT_COLLECTION}' は既に存在します")
+    except Exception as e:
+        print(f"コレクション確認/作成エラー: {e}")
+        raise
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     model, preprocess, _ = open_clip.create_model_and_transforms("ViT-B/32", pretrained="openai")
     model.to(device)
-    return client, index, model, preprocess, device
+    
+    return openai_client, qdrant_client, model, preprocess, device
 
-def create_vectors(data: Entry, related_ids: Dict[str, List[str]] = None) -> List[Dict]:
-    vectors = []
+def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List[PointStruct]:
+    """Qdrant用のPointStructを作成"""
+    points = []
     content_id = f"{data.base_name}_content"
     
     # タイプごとの重み設定
     type_weights = {
         "content": 1.0,      # メインテキスト（本文）は最大の重み
-        "figure_description": 0.75,  # 画像説明は中程度の重み
-        "case_description": 0.75,   # ケース説明も中程度の重み
-        "image": 0.75         # 画像も中程度の重み
+        "figure_description": 0.7,  # 画像説明は中程度の重み
+        "case_description": 0.7,   # ケース説明も中程度の重み
+        "image": 0.7         # 画像も中程度の重み
     }
     
     if data.type == "content":
@@ -312,14 +347,14 @@ def create_vectors(data: Entry, related_ids: Dict[str, List[str]] = None) -> Lis
             # ケース画像も追加（存在する場合）
             related_images.append(f"{data.base_name}_{case_id}_image")
         
-        vectors.append({
-                "id": content_id,
-                "values": data.text_embedding,
-                "metadata": {
+        points.append(PointStruct(
+            id=str(uuid.uuid4()),  # Qdrantでは一意のIDが必要
+            vector=data.text_embedding,
+            payload={
                 "category": CATEGORY,
                 "title": data.metadata.title,
                 "topic": data.metadata.topic,
-                "item": data.metadata.item,
+                "items": data.metadata.items,
                 "type": data.type,                                 
                 "text": data.text,
                 "weight": type_weights["content"],
@@ -328,72 +363,85 @@ def create_vectors(data: Entry, related_ids: Dict[str, List[str]] = None) -> Lis
                 "related_descriptions": related_descriptions,
                 "related_cases": related_cases 
             }
-        })
+        ))
+        
     elif data.type == "figure_description":
-        vectors.append({
-            "id": data.text_id,
-            "values": data.text_embedding,
-            "metadata": {
+        points.append(PointStruct(
+            id=str(uuid.uuid4()),
+            vector=data.text_embedding,
+            payload={
                 "category": CATEGORY,
                 "title": data.metadata.title,
                 "topic": data.metadata.topic,
-                "item": data.metadata.item,
+                "items": data.metadata.items,
                 "type": data.type,                
                 "text": data.text,
                 "weight": type_weights["figure_description"],
                 "vector_id": data.text_id,
                 "related_content_id": content_id,
                 "related_image_id": data.image_id
-               
             }
-        })
+        ))
+        
     elif data.type == "case_description":  # ケースデータの処理を追加
-        vectors.append({
-            "id": data.text_id,
-            "values": data.text_embedding,
-            "metadata": {
+        points.append(PointStruct(
+            id=str(uuid.uuid4()),
+            vector=data.text_embedding,
+            payload={
                 "category": CATEGORY,
                 "title": data.metadata.title,
                 "topic": data.metadata.topic,
-                "item": data.metadata.item,
+                "items": data.metadata.items,
                 "type": data.type,                                
                 "text": data.text,
                 "weight": type_weights["case_description"],
                 "vector_id": data.text_id,
                 "related_content_id": content_id,
-                "related_image_id": data.image_id, 
-               
+                "related_image_id": data.image_id
             }
-        })
+        ))
+        
     elif data.type == "image":
-        vectors.append({
-            "id": data.image_id,
-            "values": data.image_embedding,
-            "metadata": {
-                "category": CATEGORY,   # カテゴリーを追加
+        # 画像のメタデータからテキスト表現を作成
+        image_text_parts = []
+        if data.metadata.title:
+            image_text_parts.append(data.metadata.title)
+        if data.metadata.topic:
+            image_text_parts.append(data.metadata.topic)
+        if data.metadata.items:
+            image_text_parts.extend(data.metadata.items)        
+        
+        # テキスト部分を結合
+        image_text = " ".join(image_text_parts)
+        
+        points.append(PointStruct(
+            id=str(uuid.uuid4()),
+            vector=data.image_embedding,
+            payload={
+                "category": CATEGORY,   
                 "title": data.metadata.title,
                 "topic": data.metadata.topic,
-                "item": data.metadata.item,
+                "items": data.metadata.items,
                 "type": data.type,                
-                "weight": type_weights["image"],  # 重みを追加
+                "weight": type_weights["image"],  
                 "vector_id": data.image_id,
                 "related_content_id": content_id,
                 "related_description_id": data.text_id,
-                
+                "text": image_text  # テキストキーを追加
             }
-        })
+        ))
     
-    return vectors
+    return points
 
 def main():
     try:
         # サービスの初期化
-        client, index, model, preprocess, device = initialize_services()
+        openai_client, qdrant_client, model, preprocess, device = initialize_services()
         
         # プロセッサーの初期化
         text_processor = TextProcessor()
         image_processor = ImageProcessor(model, preprocess, device)
-        text_embedding_processor = TextEmbeddingProcessor(client)
+        text_embedding_processor = TextEmbeddingProcessor(openai_client)
         
         # テキストファイルの処理
         txt_files = glob.glob("data/*.txt")
@@ -459,7 +507,7 @@ def main():
             return
 
         # embedding処理
-        vectors_to_upsert = []
+        points_to_upsert = []
         
         # 各ファイルの処理
         for file_path in txt_files:
@@ -469,14 +517,14 @@ def main():
             entries = text_processor.process_file(file_path)
             for entry in entries:
                 entry.text_embedding = text_embedding_processor.get_embedding(entry.text)
-                vectors_to_upsert.extend(create_vectors(entry))
+                points_to_upsert.extend(create_points(entry))
             
             # Fig画像の処理
             fig_pattern = os.path.join("data", "Fig*.jpg")
             for img_path in glob.glob(fig_pattern):
                 img_name = os.path.basename(img_path)
                 # 正規表現をより正確に - 完全な Fig1a などの形式にマッチ
-                match = re.match(r'(Fig(?:\d+)?(?:[A-Za-z]+\d*)*)\.jpg', img_name)
+                match = re.match(r'(Fig\d+[a-zA-Z0-9]*)\.jpg', img_name)
                 if match:
                     fig_id = match.group(1)  # 完全なFig IDを取得 (例: Fig1a)
                     image_id = f"{entries[0].base_name}_{fig_id}_image"
@@ -493,7 +541,7 @@ def main():
                             base_name=entries[0].base_name
                         )
                         image_entry.image_embedding = image_result["vector"]
-                        vectors_to_upsert.extend(create_vectors(image_entry))
+                        points_to_upsert.extend(create_points(image_entry))
                         print(f"Fig画像のembedding生成完了: {image_id}")
                     else:
                         print(f"画像の処理に失敗: {img_path}")
@@ -502,63 +550,83 @@ def main():
             case_pattern = os.path.join("data", "case*.jpg")
             for img_path in glob.glob(case_pattern):
                 img_name = os.path.basename(img_path)
-                match = re.match(r'case(\d+)([a-z]*)\.jpg', img_name)
+                match = re.match(r'(case\d+[a-zA-Z0-9]*)\.jpg', img_name)
                 if match:
-                    case_num = match.group(1)
-                    case_variant = match.group(2)
-                    image_id = f"{entries[0].base_name}_case{case_num}{case_variant}_image"
-                    
+                    case_id = match.group(1)  # 例: "case1a1"
+                    image_id = f"{entries[0].base_name}_{case_id}_image"
+                    text_id  = f"{entries[0].base_name}_{case_id}_desc"
+
                     image_result = image_processor.get_embedding(img_path)
                     if image_result["status"] == "success":
                         image_entry = Entry(
                             type="image",
-                            number=case_num,
+                            number=case_id,
                             text="",
-                            text_id=f"{entries[0].base_name}_case{case_num}_desc",
+                            text_id=text_id,
                             image_id=image_id,
                             metadata=entries[0].metadata,
                             base_name=entries[0].base_name
                         )
                         image_entry.image_embedding = image_result["vector"]
-                        vectors_to_upsert.extend(create_vectors(image_entry))
+                        points_to_upsert.extend(create_points(image_entry))
                         print(f"ケース画像のembedding生成完了: {image_id}")
                     else:
                         print(f"画像の処理に失敗: {img_path}")
                 
         # 処理結果の表示
         print("\n=== 処理結果 ===")
-        print(f"処理したベクトル数: {len(vectors_to_upsert)}")
+        print(f"処理したポイント数: {len(points_to_upsert)}")
         print("\n各データの重みと内訳:")
         
         # 型別のカウントと重みの表示
         type_counts = {}
-        for v in vectors_to_upsert:
-            v_type = v["metadata"]["type"]
-            weight = v["metadata"]["weight"]
-            if v_type not in type_counts:
-                type_counts[v_type] = {
+        for p in points_to_upsert:
+            p_type = p.payload["type"]
+            weight = p.payload["weight"]
+            if p_type not in type_counts:
+                type_counts[p_type] = {
                     "count": 0,
                     "weight": weight
                 }
-            type_counts[v_type]["count"] += 1
+            type_counts[p_type]["count"] += 1
             
         for t, info in type_counts.items():
             print(f"- {t}:")
             print(f"  - 件数: {info['count']}")
             print(f"  - 重み: {info['weight']}")
 
-        # Pineconeへのアップロード
-        if vectors_to_upsert:
+        # Qdrantへのアップロード
+        if points_to_upsert:
             try:
-                index.upsert(vectors=vectors_to_upsert)
-                print(f"\n{len(vectors_to_upsert)}個のベクトルをPineconeに保存しました")
+                # バッチでアップロード（Qdrantは一度に大量のポイントを処理できる）
+                batch_size = 100
+                for i in range(0, len(points_to_upsert), batch_size):
+                    batch = points_to_upsert[i:i+batch_size]
+                    qdrant_client.upsert(
+                        collection_name=QDRANT_COLLECTION,
+                        points=batch
+                    )
+                    print(f"進捗: {min(i+batch_size, len(points_to_upsert))}/{len(points_to_upsert)} ポイントをアップロード")
+                
+                print(f"\n✅ {len(points_to_upsert)}個のポイントをQdrantに保存しました")
+                
+                # コレクション情報の確認
+                collection_info = qdrant_client.get_collection(QDRANT_COLLECTION)
+                print(f"\nコレクション情報:")
+                print(f"- 総ポイント数: {collection_info.points_count}")
+                print(f"- ベクトル次元: {collection_info.config.params.vectors.size}")
+                
             except Exception as e:
-                print(f"\nPineconeへの保存中にエラーが発生: {e}")
+                print(f"\nQdrantへの保存中にエラーが発生: {e}")
+                import traceback
+                traceback.print_exc()
         else:
             print("\nアップロードするデータがありません")
 
     except Exception as e:
         print(f"\n処理中にエラーが発生: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
