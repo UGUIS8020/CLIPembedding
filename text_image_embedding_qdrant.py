@@ -18,11 +18,11 @@ import uuid
 load_dotenv()
 
 # ファイルの先頭付近に定数を定義
-# CATEGORY = "dental"
-# QDRANT_COLLECTION = "raiden-main"
+CATEGORY = "dental"
+QDRANT_COLLECTION = "raiden-main"
 
-CATEGORY = "badminton"
-QDRANT_COLLECTION = "badminton"
+# CATEGORY = "badminton"
+# QDRANT_COLLECTION = "badminton"
 
 @dataclass
 class Metadata:
@@ -322,46 +322,42 @@ def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List
     
     # タイプごとの重み設定
     type_weights = {
-        "content": 1.0,      # メインテキスト（本文）は最大の重み
-        "figure_description": 0.7,  # 画像説明は中程度の重み
-        "case_description": 0.7,   # ケース説明も中程度の重み
-        "image": 0.7         # 画像も中程度の重み
+        "content": 1.0,
+        "figure_description": 0.7,
+        "case_description": 0.7,
+        "image": 0.7
     }
     
     if data.type == "content":
-        # メインコンテンツの場合
         related_images = []
         related_descriptions = []
-        related_cases = []  # ケースデータの追加
+        related_cases = []
         
-        # 図の説明と画像の関連付け
         for fig_id in data.metadata.figure_descriptions.keys():
-            # 完全な Fig ID をそのまま使用
             related_images.append(f"{data.base_name}_{fig_id}_image")
             related_descriptions.append(f"{data.base_name}_{fig_id}_desc")
         
-        # ケースの説明と画像の関連付け
         for case_id in data.metadata.case_descriptions.keys():
-            # 完全な case ID をそのまま使用
             related_cases.append(f"{data.base_name}_{case_id}_desc")
-            # ケース画像も追加（存在する場合）
             related_images.append(f"{data.base_name}_{case_id}_image")
         
         points.append(PointStruct(
-            id=str(uuid.uuid4()),  # Qdrantでは一意のIDが必要
+            id=str(uuid.uuid4()),
             vector=data.text_embedding,
             payload={
-                "category": CATEGORY,
-                "title": data.metadata.title,
-                "topic": data.metadata.topic,
-                "items": data.metadata.items,
-                "type": data.type,                                 
-                "text": data.text,
-                "weight": type_weights["content"],
-                "vector_id": content_id,
-                "related_images": related_images,
-                "related_descriptions": related_descriptions,
-                "related_cases": related_cases 
+                "page_content": data.text,  # ← トップレベルに
+                "metadata": {               # ← 他は全部この中に！
+                    "category": CATEGORY,
+                    "title": data.metadata.title,
+                    "topic": data.metadata.topic,
+                    "items": data.metadata.items,
+                    "type": data.type,
+                    "weight": type_weights["content"],
+                    "vector_id": content_id,
+                    "related_images": related_images,
+                    "related_descriptions": related_descriptions,
+                    "related_cases": related_cases
+                }
             }
         ))
         
@@ -370,64 +366,68 @@ def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List
             id=str(uuid.uuid4()),
             vector=data.text_embedding,
             payload={
-                "category": CATEGORY,
-                "title": data.metadata.title,
-                "topic": data.metadata.topic,
-                "items": data.metadata.items,
-                "type": data.type,                
-                "text": data.text,
-                "weight": type_weights["figure_description"],
-                "vector_id": data.text_id,
-                "related_content_id": content_id,
-                "related_image_id": data.image_id
+                "page_content": data.text,
+                "metadata": {
+                    "category": CATEGORY,
+                    "title": data.metadata.title,
+                    "topic": data.metadata.topic,
+                    "items": data.metadata.items,
+                    "type": data.type,
+                    "weight": type_weights["figure_description"],
+                    "vector_id": data.text_id,
+                    "related_content_id": content_id,
+                    "related_image_id": data.image_id
+                }
             }
         ))
         
-    elif data.type == "case_description":  # ケースデータの処理を追加
+    elif data.type == "case_description":
         points.append(PointStruct(
             id=str(uuid.uuid4()),
             vector=data.text_embedding,
             payload={
-                "category": CATEGORY,
-                "title": data.metadata.title,
-                "topic": data.metadata.topic,
-                "items": data.metadata.items,
-                "type": data.type,                                
-                "text": data.text,
-                "weight": type_weights["case_description"],
-                "vector_id": data.text_id,
-                "related_content_id": content_id,
-                "related_image_id": data.image_id
+                "page_content": data.text,
+                "metadata": {
+                    "category": CATEGORY,
+                    "title": data.metadata.title,
+                    "topic": data.metadata.topic,
+                    "items": data.metadata.items,
+                    "type": data.type,
+                    "weight": type_weights["case_description"],
+                    "vector_id": data.text_id,
+                    "related_content_id": content_id,
+                    "related_image_id": data.image_id
+                }
             }
         ))
         
     elif data.type == "image":
-        # 画像のメタデータからテキスト表現を作成
         image_text_parts = []
         if data.metadata.title:
             image_text_parts.append(data.metadata.title)
         if data.metadata.topic:
             image_text_parts.append(data.metadata.topic)
         if data.metadata.items:
-            image_text_parts.extend(data.metadata.items)        
+            image_text_parts.extend(data.metadata.items)
         
-        # テキスト部分を結合
         image_text = " ".join(image_text_parts)
         
         points.append(PointStruct(
             id=str(uuid.uuid4()),
             vector=data.image_embedding,
             payload={
-                "category": CATEGORY,   
-                "title": data.metadata.title,
-                "topic": data.metadata.topic,
-                "items": data.metadata.items,
-                "type": data.type,                
-                "weight": type_weights["image"],  
-                "vector_id": data.image_id,
-                "related_content_id": content_id,
-                "related_description_id": data.text_id,
-                "text": image_text  # テキストキーを追加
+                "page_content": image_text,
+                "metadata": {
+                    "category": CATEGORY,
+                    "title": data.metadata.title,
+                    "topic": data.metadata.topic,
+                    "items": data.metadata.items,
+                    "type": data.type,
+                    "weight": type_weights["image"],
+                    "vector_id": data.image_id,
+                    "related_content_id": content_id,
+                    "related_description_id": data.text_id
+                }
             }
         ))
     
@@ -581,8 +581,8 @@ def main():
         # 型別のカウントと重みの表示
         type_counts = {}
         for p in points_to_upsert:
-            p_type = p.payload["type"]
-            weight = p.payload["weight"]
+            p_type = p.payload["metadata"]["type"]      # 変更！
+            weight = p.payload["metadata"]["weight"]     # 変更！
             if p_type not in type_counts:
                 type_counts[p_type] = {
                     "count": 0,
@@ -614,7 +614,7 @@ def main():
                 collection_info = qdrant_client.get_collection(QDRANT_COLLECTION)
                 print(f"\nコレクション情報:")
                 print(f"- 総ポイント数: {collection_info.points_count}")
-                print(f"- ベクトル次元: {collection_info.config.params.vectors.size}")
+                # print(f"- ベクトル次元: {collection_info.config.params.vectors.size}")
                 
             except Exception as e:
                 print(f"\nQdrantへの保存中にエラーが発生: {e}")

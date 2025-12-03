@@ -17,7 +17,7 @@ load_dotenv()
 
 # ファイルの先頭付近に定数を定義
 CATEGORY = "dental"
-PINECONE_INDEX ="raiden-main" 
+PINECONE_INDEX ="raiden02" 
 
 # CATEGORY = "badminton"
 # PINECONE_INDEX ="badminton" 
