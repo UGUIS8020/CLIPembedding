@@ -71,7 +71,6 @@ def init_qdrant():
         print(f"Qdrant collection '{QDRANT_COLLECTION}' を新規作成しました")
     else:
         info = client.get_collection(QDRANT_COLLECTION)
-        # points_count / vectors_count のどちらかあれば使う
         count = getattr(info, "points_count", None)
         if count is None:
             count = getattr(info, "vectors_count", None)
@@ -86,8 +85,73 @@ def init_qdrant():
 
 def to_uuid_from_pinecone_id(vid: str) -> str:
     """Pinecone の string ID を Qdrant 用の UUID に変換（決定的）"""
-    # ここを uuid.NamespaceDNS ではなく uuid.NAMESPACE_DNS に
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"raiden-main:{vid}"))
+
+
+def flatten_payload(metadata: dict, original_id: str) -> dict:
+    """
+    ネスト構造のpayloadをフラット化する
+    
+    Before:
+    {
+        "page_content": "...",
+        "metadata": {
+            "type": "content",
+            "weight": 1.0,
+            "title": "...",
+            ...
+        }
+    }
+    
+    After:
+    {
+        "text": "...",
+        "type": "content",
+        "weight": 1.0,
+        "title": "...",
+        "original_id": "...",
+        ...
+    }
+    """
+    # デバッグ: 最初の数件で構造を確認
+    if not hasattr(flatten_payload, 'debug_count'):
+        flatten_payload.debug_count = 0
+    
+    if flatten_payload.debug_count < 3:
+        print(f"\n=== Payload 構造デバッグ {flatten_payload.debug_count + 1} ===")
+        print(f"Keys: {list(metadata.keys())}")
+        flatten_payload.debug_count += 1
+    
+    flattened = {}
+    
+    # ネスト構造の場合
+    if "metadata" in metadata:
+        # page_content を text に変換
+        if "page_content" in metadata:
+            flattened["text"] = metadata["page_content"]
+        
+        # metadata の中身を全て展開
+        nested_metadata = metadata["metadata"]
+        if isinstance(nested_metadata, dict):
+            flattened.update(nested_metadata)
+        
+        # metadata以外のトップレベルフィールドも保持
+        for key, value in metadata.items():
+            if key not in ["metadata", "page_content"]:
+                flattened[key] = value
+    
+    # 既にフラットな構造の場合
+    else:
+        flattened = metadata.copy()
+        
+        # page_content が存在したら text に変換
+        if "page_content" in flattened:
+            flattened["text"] = flattened.pop("page_content")
+    
+    # original_id を必ず追加
+    flattened["original_id"] = original_id
+    
+    return flattened
 
 
 def safe_upsert(qdrant: QdrantClient, points_batch):
@@ -97,7 +161,7 @@ def safe_upsert(qdrant: QdrantClient, points_batch):
             qdrant.upsert(
                 collection_name=QDRANT_COLLECTION,
                 points=points_batch,
-                wait=True,  # 処理完了を待つ
+                wait=True,
             )
             return
         except UnexpectedResponse as e:
@@ -130,7 +194,8 @@ def migrate():
     if dim != VECTOR_DIM:
         print(f"警告: Pinecone の次元数 {dim} と Qdrant の設定 {VECTOR_DIM} が一致していません。")
 
-    print("Pinecone から ID を列挙して順次 fetch します...")
+    print("\n🔄 Pinecone から Qdrant への移行を開始します...")
+    print("📝 Payload構造をフラット化しながら移行します\n")
 
     migrated_count = 0
     batch_no = 0
@@ -163,11 +228,8 @@ def migrate():
                 values = getattr(record, "values", [])
                 metadata = getattr(record, "metadata", {})
 
-            # payload に元 ID を残す
-            if isinstance(metadata, dict):
-                metadata = {**metadata, "original_id": vid}
-            else:
-                metadata = {"original_id": vid}
+            # ★ ここでpayloadをフラット化
+            flattened_payload = flatten_payload(metadata, vid)
 
             qdrant_id = to_uuid_from_pinecone_id(vid)
 
@@ -175,7 +237,7 @@ def migrate():
                 PointStruct(
                     id=qdrant_id,
                     vector=values,
-                    payload=metadata,
+                    payload=flattened_payload,
                 )
             )
 
@@ -190,7 +252,9 @@ def migrate():
 
         print(f"Batch {batch_no}: {len(points)} 件を移行 (累計 {migrated_count})")
 
-    print(f"移行完了: 合計 {migrated_count} ベクトルを Qdrant にコピーしました。")
+    print(f"\n✅ 移行完了: 合計 {migrated_count} ベクトルを Qdrant にコピーしました。")
+    print("\n📊 移行後のデータ構造を確認してください:")
+    print("python check_vector_ids.py")
 
 
 if __name__ == "__main__":

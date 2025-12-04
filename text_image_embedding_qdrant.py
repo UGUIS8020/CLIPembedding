@@ -345,19 +345,19 @@ def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List
             id=str(uuid.uuid4()),
             vector=data.text_embedding,
             payload={
-                "page_content": data.text,  # ← トップレベルに
-                "metadata": {               # ← 他は全部この中に！
-                    "category": CATEGORY,
-                    "title": data.metadata.title,
-                    "topic": data.metadata.topic,
-                    "items": data.metadata.items,
-                    "type": data.type,
-                    "weight": type_weights["content"],
-                    "vector_id": content_id,
-                    "related_images": related_images,
-                    "related_descriptions": related_descriptions,
-                    "related_cases": related_cases
-                }
+                # 全てトップレベルに配置
+                "text": data.text,                    # ← page_contentではなくtext
+                "category": CATEGORY,
+                "title": data.metadata.title,
+                "topic": data.metadata.topic,
+                "items": data.metadata.items,
+                "type": data.type,                    # ← トップレベル！
+                "weight": type_weights["content"],    # ← トップレベル！
+                "vector_id": content_id,
+                "original_id": content_id,            # ← 追加
+                "related_images": related_images,
+                "related_descriptions": related_descriptions,
+                "related_cases": related_cases
             }
         ))
         
@@ -366,18 +366,17 @@ def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List
             id=str(uuid.uuid4()),
             vector=data.text_embedding,
             payload={
-                "page_content": data.text,
-                "metadata": {
-                    "category": CATEGORY,
-                    "title": data.metadata.title,
-                    "topic": data.metadata.topic,
-                    "items": data.metadata.items,
-                    "type": data.type,
-                    "weight": type_weights["figure_description"],
-                    "vector_id": data.text_id,
-                    "related_content_id": content_id,
-                    "related_image_id": data.image_id
-                }
+                "text": data.text,
+                "category": CATEGORY,
+                "title": data.metadata.title,
+                "topic": data.metadata.topic,
+                "items": data.metadata.items,
+                "type": data.type,                           # ← トップレベル！
+                "weight": type_weights["figure_description"], # ← トップレベル！
+                "vector_id": data.text_id,
+                "original_id": data.text_id,                  # ← 追加
+                "related_content_id": content_id,
+                "related_image_id": data.image_id
             }
         ))
         
@@ -386,18 +385,17 @@ def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List
             id=str(uuid.uuid4()),
             vector=data.text_embedding,
             payload={
-                "page_content": data.text,
-                "metadata": {
-                    "category": CATEGORY,
-                    "title": data.metadata.title,
-                    "topic": data.metadata.topic,
-                    "items": data.metadata.items,
-                    "type": data.type,
-                    "weight": type_weights["case_description"],
-                    "vector_id": data.text_id,
-                    "related_content_id": content_id,
-                    "related_image_id": data.image_id
-                }
+                "text": data.text,
+                "category": CATEGORY,
+                "title": data.metadata.title,
+                "topic": data.metadata.topic,
+                "items": data.metadata.items,
+                "type": data.type,                          # ← トップレベル！
+                "weight": type_weights["case_description"], # ← トップレベル！
+                "vector_id": data.text_id,
+                "original_id": data.text_id,                # ← 追加
+                "related_content_id": content_id,
+                "related_image_id": data.image_id
             }
         ))
         
@@ -416,18 +414,17 @@ def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List
             id=str(uuid.uuid4()),
             vector=data.image_embedding,
             payload={
-                "page_content": image_text,
-                "metadata": {
-                    "category": CATEGORY,
-                    "title": data.metadata.title,
-                    "topic": data.metadata.topic,
-                    "items": data.metadata.items,
-                    "type": data.type,
-                    "weight": type_weights["image"],
-                    "vector_id": data.image_id,
-                    "related_content_id": content_id,
-                    "related_description_id": data.text_id
-                }
+                "text": image_text,
+                "category": CATEGORY,
+                "title": data.metadata.title,
+                "topic": data.metadata.topic,
+                "items": data.metadata.items,
+                "type": data.type,                # ← トップレベル！
+                "weight": type_weights["image"],  # ← トップレベル！
+                "vector_id": data.image_id,
+                "original_id": data.image_id,     # ← 追加
+                "related_content_id": content_id,
+                "related_description_id": data.text_id
             }
         ))
     
