@@ -578,8 +578,8 @@ def main():
         # 型別のカウントと重みの表示
         type_counts = {}
         for p in points_to_upsert:
-            p_type = p.payload["metadata"]["type"]      # 変更！
-            weight = p.payload["metadata"]["weight"]     # 変更！
+            p_type = p.payload["type"]      # フラット構造なので直接アクセス
+            weight = p.payload["weight"]    # フラット構造なので直接アクセス
             if p_type not in type_counts:
                 type_counts[p_type] = {
                     "count": 0,

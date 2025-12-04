@@ -24,9 +24,12 @@ QDRANT_COLLECTION = "raiden-main"
 VECTOR_DIM = 1536
 QDRANT_DISTANCE = Distance.COSINE
 
-# Qdrant に一度に投げるポイント数（小さめ）
+# Qdrant に一度に投げるポイント数
 MAX_QDRANT_BATCH = 64
-MAX_RETRIES = 3
+MAX_RETRIES = 5
+
+# デバッグモード
+DEBUG_MODE = False
 
 
 def validate_env():
@@ -57,7 +60,16 @@ def init_qdrant():
     client = QdrantClient(
         url=QDRANT_URL,
         api_key=QDRANT_API_KEY,
+        timeout=180  # タイムアウトを180秒に設定
     )
+    
+    # 接続テスト
+    try:
+        collections = client.get_collections()
+        print(f"✅ Qdrant接続成功。コレクション数: {len(collections.collections)}")
+    except Exception as e:
+        print(f"❌ Qdrant接続エラー: {e}")
+        raise
 
     # すでにコレクションがあれば「そのまま使う」
     if not client.collection_exists(QDRANT_COLLECTION):
@@ -155,27 +167,49 @@ def flatten_payload(metadata: dict, original_id: str) -> dict:
 
 
 def safe_upsert(qdrant: QdrantClient, points_batch):
-    """502 が出たらリトライしながら upsert する"""
+    """502やタイムアウトが出たらリトライしながら upsert する"""
+    batch_size = len(points_batch)
+    
+    if DEBUG_MODE:
+        print(f"  📤 バッチアップロード開始: {batch_size}件")
+        # ペイロードサイズの概算
+        total_payload_size = sum(len(str(p.payload)) for p in points_batch)
+        print(f"  📊 推定ペイロードサイズ: {total_payload_size:,} バイト")
+    
     for attempt in range(1, MAX_RETRIES + 1):
         try:
+            start_time = time.time()
             qdrant.upsert(
                 collection_name=QDRANT_COLLECTION,
                 points=points_batch,
                 wait=True,
             )
+            elapsed = time.time() - start_time
+            if DEBUG_MODE:
+                print(f"  ✅ アップロード成功: {elapsed:.2f}秒")
             return
         except UnexpectedResponse as e:
             if getattr(e, "status_code", None) == 502 and attempt < MAX_RETRIES:
                 sleep_sec = 2 * attempt
                 print(
-                    f"Qdrant から 502 Bad Gateway "
-                    f"(attempt {attempt}/{MAX_RETRIES}) -> {sleep_sec} 秒スリープしてリトライ"
+                    f"  ⚠️ 502 Bad Gateway "
+                    f"(attempt {attempt}/{MAX_RETRIES}) -> {sleep_sec}秒待機"
                 )
                 time.sleep(sleep_sec)
                 continue
             raise
         except Exception as e:
-            print(f"upsert 中に予期せぬエラー: {e}")
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ["timeout", "timed out", "connection"]) and attempt < MAX_RETRIES:
+                sleep_sec = 5 * attempt  # より長い待機時間
+                print(
+                    f"  ⚠️ 接続/タイムアウトエラー "
+                    f"(attempt {attempt}/{MAX_RETRIES}) -> {sleep_sec}秒待機"
+                )
+                print(f"     エラー詳細: {str(e)[:100]}...")
+                time.sleep(sleep_sec)
+                continue
+            print(f"❌ upsert 中に回復不能エラー: {e}")
             raise
 
 
@@ -228,8 +262,10 @@ def migrate():
                 values = getattr(record, "values", [])
                 metadata = getattr(record, "metadata", {})
 
-            # ★ ここでpayloadをフラット化
-            flattened_payload = flatten_payload(metadata, vid)
+            # メタデータをそのまま使用（フラット化は不要）
+            # original_id だけ追加
+            flattened_payload = metadata.copy()
+            flattened_payload["original_id"] = vid
 
             qdrant_id = to_uuid_from_pinecone_id(vid)
 
@@ -245,12 +281,21 @@ def migrate():
             continue
 
         # Qdrant 用にさらに細かいバッチに分割して upsert
+        print(f"\n📦 Batch {batch_no}: {len(points)} 件を {MAX_QDRANT_BATCH} 件ずつ分割してアップロード")
+        
         for i in range(0, len(points), MAX_QDRANT_BATCH):
             sub_points = points[i:i + MAX_QDRANT_BATCH]
+            sub_batch_no = (i // MAX_QDRANT_BATCH) + 1
+            total_sub_batches = (len(points) + MAX_QDRANT_BATCH - 1) // MAX_QDRANT_BATCH
+            
+            print(f"  📤 サブバッチ {sub_batch_no}/{total_sub_batches}")
             safe_upsert(qdrant, sub_points)
             migrated_count += len(sub_points)
+            
+            # 各バッチ間に待機時間を追加（サーバー負荷軽減）
+            time.sleep(1.0)
 
-        print(f"Batch {batch_no}: {len(points)} 件を移行 (累計 {migrated_count})")
+        print(f"✅ Batch {batch_no} 完了 (累計 {migrated_count}/{total_vectors})")
 
     print(f"\n✅ 移行完了: 合計 {migrated_count} ベクトルを Qdrant にコピーしました。")
     print("\n📊 移行後のデータ構造を確認してください:")

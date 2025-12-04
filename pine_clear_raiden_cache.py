@@ -9,7 +9,7 @@ load_dotenv()
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
 # インデックス名
-INDEX_NAME = "raiden-cache"
+INDEX_NAME = "raiden-main"
 
 # Pineconeクライアントのインスタンス化
 pc = Pinecone(api_key=PINECONE_API_KEY)
