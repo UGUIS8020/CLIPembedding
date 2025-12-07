@@ -67,6 +67,19 @@ def main():
         title = payload.get('title', '-')
         print(f"  title: {title[:50]}..." if len(title) > 50 else f"  title: {title}")
         print()
+    
+    # テキスト内容を表示するか確認
+    if results:
+        show_text = input("テキスト内容を表示しますか？ (y/n): ").strip().lower()
+        if show_text == 'y':
+            for point in results:
+                payload = point.payload
+                print("\n" + "=" * 60)
+                print(f"【{payload.get('vector_id', '-')}】")
+                print("=" * 60)
+                text = payload.get('text', payload.get('section_text', '-'))
+                print(text[:1000] if len(text) > 1000 else text)
+                print()
 
 if __name__ == "__main__":
     main()
