@@ -13,6 +13,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 import uuid
+from qdrant_client import models
 
 # 環境変数をロード
 load_dotenv()
@@ -213,25 +214,24 @@ class ImageProcessor:
         self.device = device
 
     def get_embedding(self, image_path: str) -> Dict:
-        """画像のembeddingを生成"""
         try:
             image = self.preprocess(Image.open(image_path)).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 image_embedding = self.model.encode_image(image)
             image_embedding /= image_embedding.norm(dim=-1, keepdim=True)
             vector = image_embedding.cpu().numpy().tolist()[0]
-            expanded_vector = np.concatenate([vector, np.zeros(1536-len(vector))]).tolist()
+            
+            # 512次元 -> 1536次元への拡張 (OpenAIのembeddingサイズに合わせる)
+            target_dim = 1536
+            expanded_vector = np.pad(vector, (0, target_dim - len(vector)), 'constant').tolist()
+            
             return {
                 "vector": expanded_vector,
                 "status": "success"
             }
         except Exception as e:
             print(f"画像エンベディングエラー: {e}")
-            return {
-                "vector": [0.0] * 1536,
-                "status": "error",
-                "error_message": str(e)
-            }
+            return {"vector": [0.0] * 1536, "status": "error", "error_message": str(e)}
 
 class TextEmbeddingProcessor:
     def __init__(self, client):
@@ -315,12 +315,15 @@ def initialize_services():
     
     return openai_client, qdrant_client, model, preprocess, device
 
-def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List[PointStruct]:
+def generate_deterministic_uuid(name: str) -> str:
+    """名前（ID文字列）から一意のUUIDを生成。再実行時に重複登録を防ぐ。"""
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
+
+def create_points(data: Entry) -> List[models.PointStruct]:
     """Qdrant用のPointStructを作成"""
     points = []
     content_id = f"{data.base_name}_content"
     
-    # タイプごとの重み設定
     type_weights = {
         "content": 1.0,
         "figure_description": 0.7,
@@ -328,107 +331,74 @@ def create_points(data: Entry, related_ids: Dict[str, List[str]] = None) -> List
         "image": 0.7
     }
     
+    # 共通のペイロード作成
+    payload = {
+        "category": CATEGORY,
+        "title": data.metadata.title,
+        "topic": data.metadata.topic,
+        "items": data.metadata.items,
+        "type": data.type,
+        "weight": type_weights.get(data.type, 1.0),
+        "base_name": data.base_name
+    }
+
     if data.type == "content":
-        related_images = []
-        related_descriptions = []
-        related_cases = []
-        
-        for fig_id in data.metadata.figure_descriptions.keys():
-            related_images.append(f"{data.base_name}_{fig_id}_image")
-            related_descriptions.append(f"{data.base_name}_{fig_id}_desc")
-        
-        for case_id in data.metadata.case_descriptions.keys():
-            related_cases.append(f"{data.base_name}_{case_id}_desc")
-            related_images.append(f"{data.base_name}_{case_id}_image")
-        
-        points.append(PointStruct(
-            id=str(uuid.uuid4()),
-            vector=data.text_embedding,
-            payload={
-                # 全てトップレベルに配置
-                "text": data.text,                    # ← page_contentではなくtext
-                "category": CATEGORY,
-                "title": data.metadata.title,
-                "topic": data.metadata.topic,
-                "items": data.metadata.items,
-                "type": data.type,                    # ← トップレベル！
-                "weight": type_weights["content"],    # ← トップレベル！
-                "vector_id": content_id,
-                "original_id": content_id,            # ← 追加
-                "related_images": related_images,
-                "related_descriptions": related_descriptions,
-                "related_cases": related_cases
-            }
-        ))
-        
-    elif data.type == "figure_description":
-        points.append(PointStruct(
-            id=str(uuid.uuid4()),
-            vector=data.text_embedding,
-            payload={
-                "text": data.text,
-                "category": CATEGORY,
-                "title": data.metadata.title,
-                "topic": data.metadata.topic,
-                "items": data.metadata.items,
-                "type": data.type,                           # ← トップレベル！
-                "weight": type_weights["figure_description"], # ← トップレベル！
-                "vector_id": data.text_id,
-                "original_id": data.text_id,                  # ← 追加
-                "related_content_id": content_id,
-                "related_image_id": data.image_id
-            }
-        ))
-        
-    elif data.type == "case_description":
-        points.append(PointStruct(
-            id=str(uuid.uuid4()),
-            vector=data.text_embedding,
-            payload={
-                "text": data.text,
-                "category": CATEGORY,
-                "title": data.metadata.title,
-                "topic": data.metadata.topic,
-                "items": data.metadata.items,
-                "type": data.type,                          # ← トップレベル！
-                "weight": type_weights["case_description"], # ← トップレベル！
-                "vector_id": data.text_id,
-                "original_id": data.text_id,                # ← 追加
-                "related_content_id": content_id,
-                "related_image_id": data.image_id
-            }
-        ))
-        
+        payload.update({
+            "text": data.text,
+            "original_id": content_id,
+            "related_images": [f"{data.base_name}_{f}_image" for f in data.metadata.figure_descriptions.keys()],
+            "related_descriptions": [f"{data.base_name}_{f}_desc" for f in data.metadata.figure_descriptions.keys()]
+        })
+        point_id = generate_deterministic_uuid(content_id)
+        vector = data.text_embedding
+
+    elif data.type in ["figure_description", "case_description"]:
+        payload.update({
+            "text": data.text,
+            "original_id": data.text_id,
+            "related_content_id": content_id,
+            "related_image_id": data.image_id
+        })
+        point_id = generate_deterministic_uuid(data.text_id)
+        vector = data.text_embedding
+
     elif data.type == "image":
-        image_text_parts = []
-        if data.metadata.title:
-            image_text_parts.append(data.metadata.title)
-        if data.metadata.topic:
-            image_text_parts.append(data.metadata.topic)
-        if data.metadata.items:
-            image_text_parts.extend(data.metadata.items)
-        
-        image_text = " ".join(image_text_parts)
-        
-        points.append(PointStruct(
-            id=str(uuid.uuid4()),
-            vector=data.image_embedding,
-            payload={
-                "text": image_text,
-                "category": CATEGORY,
-                "title": data.metadata.title,
-                "topic": data.metadata.topic,
-                "items": data.metadata.items,
-                "type": data.type,                # ← トップレベル！
-                "weight": type_weights["image"],  # ← トップレベル！
-                "vector_id": data.image_id,
-                "original_id": data.image_id,     # ← 追加
-                "related_content_id": content_id,
-                "related_description_id": data.text_id
-            }
-        ))
-    
+        # 画像検索用の補助テキスト
+        image_text = f"{data.metadata.title} {data.metadata.topic} {' '.join(data.metadata.items)}"
+        payload.update({
+            "text": image_text,
+            "original_id": data.image_id,
+            "related_content_id": content_id,
+            "related_description_id": data.text_id
+        })
+        point_id = generate_deterministic_uuid(data.image_id)
+        vector = data.image_embedding
+
+    points.append(models.PointStruct(
+        id=point_id,
+        vector=vector,
+        payload=payload
+    ))
     return points
+
+def initialize_services():
+    env_vars = validate_environment()
+    openai_client = openai.OpenAI(api_key=env_vars["OPENAI_API_KEY"])
+    qdrant_client = QdrantClient(url=env_vars["QDRANT_URL"], api_key=env_vars["QDRANT_API_KEY"])
+    
+    # コレクション作成
+    collections = qdrant_client.get_collections()
+    if not any(c.name == QDRANT_COLLECTION for c in collections.collections):
+        qdrant_client.create_collection(
+            collection_name=QDRANT_COLLECTION,
+            vectors_config=models.VectorParams(size=1536, distance=models.Distance.COSINE)
+        )
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, _, preprocess = open_clip.create_model_and_transforms("ViT-B/32", pretrained="openai")
+    model.to(device)
+    
+    return openai_client, qdrant_client, model, preprocess, device
 
 def main():
     try:
